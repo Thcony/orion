@@ -231,3 +231,45 @@ def pensar(entrada, tools_desc):
                         "hora, lembrete e abrir app seguem funcionando.", "acoes": []}
     return {"fala": "Nenhum modelo respondeu. Roda `orion modelos` pra ver o que tua chave aceita.",
             "acoes": []}
+
+
+def pesquisar(pergunta):
+    """Busca no Google via grounding do Gemini. Devolve resumo + fontes."""
+    global _ultima_chamada
+    if not config.API_KEY:
+        return "sem chave do Gemini (orion chave SUA_CHAVE)"
+    if not orcamento.pode():
+        return "bati o teto de chamadas de hoje"
+    corpo = {
+        "contents": [{"role": "user", "parts": [{"text":
+            f"Pesquise e responda em portugues do Brasil, curto e direto: {pergunta}"}]}],
+        "tools": [{"google_search": {}}],
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1024},
+    }
+    cache = _cache()
+    mortos = set(cache.get("mortos", []))
+    fila = [m for m in dict.fromkeys([config.MODELO, cache.get("modelo"), config.MODELO_RESERVA])
+            if m and m not in mortos]
+    for modelo in fila:
+        try:
+            r = _post(modelo, corpo)
+        except urllib.error.HTTPError as e:
+            if e.code in (400, 404, 429, 500, 503):
+                continue  # modelo sem busca, cota ou fora do ar: tenta o proximo
+            return f"busca falhou ({e.code})"
+        except Exception as e:
+            return f"sem rede pra pesquisar: {type(e).__name__}"
+        _ultima_chamada = time.time()
+        orcamento.gastar()
+        try:
+            texto = _texto(r)
+        except RuntimeError as e:
+            return str(e)
+        meta = (r.get("candidates") or [{}])[0].get("groundingMetadata") or {}
+        fontes = []
+        for c in meta.get("groundingChunks", [])[:5]:
+            w = c.get("web") or {}
+            if w.get("title"):
+                fontes.append(f"- {w['title']}")
+        return texto.strip() + ("\n\nFontes:\n" + "\n".join(fontes) if fontes else "")
+    return "nenhum modelo liberou a busca agora (cota ou modelo sem suporte)"

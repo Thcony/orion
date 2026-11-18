@@ -54,7 +54,12 @@ def rodar_acoes(acoes):
                 continue
 
         res = tools.executar(tool, args)
-        print(f"{CINZA}{res}{RESET}")
+        if tool == "pesquisar":
+            fala(res.split("\n\nFontes:")[0])
+            if "\n\nFontes:" in res:
+                print(f"{CINZA}Fontes:{res.split(chr(10)*2 + 'Fontes:')[1]}{RESET}")
+        else:
+            print(f"{CINZA}{res}{RESET}")
         memory.registrar_acao(tool, args, res)
 
 

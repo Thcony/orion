@@ -224,6 +224,18 @@ def lembrar_isso(chave, valor):
     return f"guardei: {chave} = {valor}"
 
 
+# ---------- internet ----------
+def pesquisar(pergunta):
+    from . import brain
+    return brain.pesquisar(pergunta)
+
+
+def abrir_site(url):
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    return abrir_app(url)
+
+
 # ---------- auto-update ----------
 def buscar_update():
     from . import updater
@@ -253,6 +265,7 @@ TOOLS = {
     "agora": agora, "criar_lembrete": criar_lembrete, "listar_lembretes": listar_lembretes,
     "anotar": anotar, "lembrar_isso": lembrar_isso,
     "buscar_update": buscar_update, "aplicar_update": aplicar_update,
+    "pesquisar": pesquisar, "abrir_site": abrir_site,
 }
 
 NIVEL = {
@@ -263,6 +276,7 @@ NIVEL = {
     "meu_ip": G, "rede": G, "agora": G, "criar_lembrete": G,
     "listar_lembretes": G, "anotar": G, "lembrar_isso": G,
     "buscar_update": G, "aplicar_update": C,
+    "pesquisar": G, "abrir_site": G,
 }
 
 DESCRICAO = """- rodar_cmd(comando, shell="cmd"|"powershell") comando cru
@@ -274,7 +288,8 @@ DESCRICAO = """- rodar_cmd(comando, shell="cmd"|"powershell") comando cru
 - info_sistema() / meu_ip() / rede()
 - agora() hora e data | criar_lembrete(texto, quando) | listar_lembretes()
 - anotar(titulo, texto) no Obsidian | lembrar_isso(chave, valor)
-- buscar_update() ve se tem versao nova | aplicar_update() baixa e instala"""
+- buscar_update() ve se tem versao nova | aplicar_update() baixa e instala
+- pesquisar(pergunta) busca na internet e resume com fontes | abrir_site(url)"""
 
 
 def executar(tool, args):

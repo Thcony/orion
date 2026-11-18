@@ -26,7 +26,7 @@ REGRAS = {
         "Se quiser script em Python pro Blender, e so pedir.",
     ],
     "code": ["VS Code aberto. Em que projeto a gente ta hoje?"],
-    "brave": ["Pesquisando algo? Posso procurar junto se quiser."],
+    "brave": ["Pesquisando algo? Me fala que eu busco e te resumo."],
     "steam": ["Steam aberta. Quer que eu veja o que ta instalado ou libere espaco?"],
     "obs64": ["Vai gravar? Quer que eu feche o que ta comendo CPU?"],
 }
