@@ -142,7 +142,7 @@ def main():
     scheduler.vigiar(lambda t: fala(f"Lembrete: {t}"))
     watcher.vigiar(fala)
 
-    estado_voz = "voz on" if (config.VOZ and voz.disponivel()) else "mudo"
+    estado_voz = f"voz: {voz.motor_atual()}" if config.VOZ else "mudo"
     print(f"{VERDE}Orion online.{RESET} vault: {config.VAULT}")
     print(f"{CINZA}{brain.orcamento.restante()} chamadas hoje | {estado_voz} | "
           f"'calado' silencia | 'sair' encerra{RESET}\n")

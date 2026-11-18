@@ -59,7 +59,10 @@ AUTO_UPDATE = _env("ORION_AUTO_UPDATE", "1") == "1"
 
 # Voz (Windows SAPI). VELOCIDADE: -10 (lento) a 10 (rapido). NOME: ex "Maria".
 VOZ = _env("ORION_VOZ", "1") == "1"
-VOZ_NOME = _env("ORION_VOZ_NOME")
+VOZ_NOME = _env("ORION_VOZ_NOME")          # voz do Windows (reserva)
+VOZ_MOTOR = _env("ORION_VOZ_MOTOR", "gemini")   # gemini | windows
+VOZ_GEMINI = _env("ORION_VOZ_GEMINI", "Charon")  # Charon=grave; Orus, Fenrir, Puck, Kore...
+VOZ_MODELO = _env("ORION_VOZ_MODELO", "gemini-2.5-flash-preview-tts")
 VOZ_VELOCIDADE = int(_env("ORION_VOZ_VELOCIDADE", "0"))
 
 

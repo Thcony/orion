@@ -1,17 +1,29 @@
-"""Voz do Orion: fala em voz alta com as vozes nativas do Windows (SAPI),
-via PowerShell. Nao baixa nada, funciona offline. Fora do Windows, fica mudo
-sem reclamar. Erro aqui nunca derruba a conversa.
+"""Voz do Orion.
+Principal: voz do Gemini (TTS). Reserva automatica: vozes do Windows (SAPI),
+quando a cota do TTS estoura, a rede cai ou o modelo some.
+Erro aqui nunca derruba a conversa.
 """
+import base64
+import json
 import os
 import shutil
 import subprocess
 import tempfile
+import threading
+import urllib.error
+import urllib.request
+import wave
+from datetime import date
 from pathlib import Path
 
 from core import config
 
 _proc = None
 _ok = None
+_geracao = 0           # cada fala nova invalida a anterior (barge-in)
+_tts_morto = None      # dia em que a cota do TTS estourou
+MAX_CHARS = 500
+TMP = Path(tempfile.gettempdir())
 
 
 def _powershell():
@@ -43,7 +55,13 @@ def listar_vozes():
 
 def parar():
     """Corta a fala atual (barge-in quando o chefe manda outra coisa)."""
-    global _proc
+    global _proc, _geracao
+    _geracao += 1
+    try:
+        import winsound
+        winsound.PlaySound(None, 0)
+    except Exception:
+        pass
     if _proc and _proc.poll() is None:
         try:
             _proc.terminate()
@@ -52,11 +70,86 @@ def parar():
     _proc = None
 
 
+# ---------------- Gemini TTS ----------------
+def _gemini_pcm(texto):
+    """Devolve PCM 16-bit 24 kHz mono, ou levanta erro."""
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{config.VOZ_MODELO}:generateContent?key={config.API_KEY}")
+    corpo = {
+        "contents": [{"parts": [{"text":
+            f"Fale em portugues do Brasil, tom natural e descontraido: {texto}"}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig":
+                                             {"voiceName": config.VOZ_GEMINI}}},
+        },
+    }
+    req = urllib.request.Request(url, data=json.dumps(corpo).encode("utf-8"),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=45) as r:
+        d = json.loads(r.read().decode("utf-8"))
+    for parte in d["candidates"][0]["content"]["parts"]:
+        if "inlineData" in parte:
+            return base64.b64decode(parte["inlineData"]["data"])
+    raise RuntimeError("TTS sem audio")
+
+
+def _wav(pcm, caminho):
+    with wave.open(str(caminho), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(24000)
+        w.writeframes(pcm)
+    return caminho
+
+
+def _tocar(caminho):
+    import winsound
+    winsound.PlaySound(str(caminho), winsound.SND_FILENAME)  # bloqueia a thread, nao o terminal
+
+
+def _gemini_usavel():
+    return (config.VOZ_MOTOR == "gemini" and config.API_KEY
+            and _tts_morto != str(date.today()))
+
+
+def _thread_gemini(texto, minha):
+    global _tts_morto
+    try:
+        pcm = _gemini_pcm(texto)
+        if minha != _geracao:
+            return  # chefe ja mandou outra coisa
+        _tocar(_wav(pcm, TMP / "orion_fala.wav"))
+    except urllib.error.HTTPError as e:
+        if e.code in (429, 404, 403):
+            _tts_morto = str(date.today())  # para de tentar hoje, vai de SAPI
+        if minha == _geracao:
+            _sapi(texto)
+    except Exception:
+        if minha == _geracao:
+            _sapi(texto)
+
+
+# ---------------- entrada ----------------
 def falar(texto):
-    global _proc
     if not texto or not config.VOZ or not disponivel():
         return
     parar()
+    texto = texto[:MAX_CHARS]
+    if _gemini_usavel():
+        threading.Thread(target=_thread_gemini, args=(texto, _geracao), daemon=True).start()
+    else:
+        _sapi(texto)
+
+
+def motor_atual():
+    if not disponivel():
+        return "mudo"
+    return f"Gemini ({config.VOZ_GEMINI})" if _gemini_usavel() else "Windows (SAPI)"
+
+
+def _sapi(texto):
+    global _proc
     ps = _powershell()
     tmp = Path(tempfile.gettempdir()) / "orion_fala.txt"
     try:
