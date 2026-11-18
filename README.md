@@ -1,5 +1,27 @@
 # Orion - agente de PC (Windows)
 
+## Versao Rust (em migracao)
+
+`dist/orion.exe` e o Orion em Rust: um .exe so, sem Python, janela com
+orb na placa de video. Usa o MESMO `.env`, vault e `data/` da versao
+Python, entao a memoria e a cota sao compartilhadas.
+
+Chega pelo `orion atualizar` em `Orion\dist\orion.exe`. Feche o
+orion.exe antes de atualizar (o Windows trava arquivo aberto).
+
+Fase 1 (pronta): conversa, cota, troca automatica de modelo, memoria no
+Obsidian, trava de seguranca, comandos, apps, pastas, processos, info do
+sistema, IP. Na janela: `/chave SUA_CHAVE` troca a chave, `/sair` fecha.
+
+Fases seguintes: voz Charon, pesquisa, avisos ao abrir app, lembretes,
+desinstalador, wallpaper, anexos, auto-update proprio. Ate la, a versao
+Python segue completa.
+
+Codigo em `rust/orion` (`cargo test` roda 15 testes).
+
+---
+
+
 Cerebro: Gemini (nuvem). Maos: Python local. Memoria: vault Obsidian.
 
 ## Arquitetura (por que e assim)

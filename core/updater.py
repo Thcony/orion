@@ -120,7 +120,7 @@ def atualizar(forcar=False):
         backup = BACKUPS / f"{datetime.now():%Y%m%d-%H%M%S}-{sha[:7]}"
         backup.mkdir(parents=True, exist_ok=True)
 
-        mudados, novos = [], []
+        mudados, novos, pulados = [], [], []
         for src in novo.rglob("*"):
             if not src.is_file():
                 continue
@@ -138,8 +138,18 @@ def atualizar(forcar=False):
             else:
                 novos.append(str(rel))
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
+            try:
+                shutil.copy2(src, dst)
+            except OSError:  # no Windows, arquivo aberto (ex: orion.exe rodando) fica travado
+                pulados.append(str(rel))
+                mudados = [m for m in mudados if m != str(rel)]
+                novos = [n for n in novos if n != str(rel)]
 
+    if pulados:  # nao marca como atualizado, senao o arquivo travado nunca chega
+        return False, ("nao atualizei (em uso): " + ", ".join(pulados) +
+                       "\nfecha o Orion e roda 'orion atualizar' de novo")
+
+    _limpar_backups()
     if isinstance(info, dict):
         VERSAO.write_text(json.dumps({
             "sha": info["sha"], "msg": info.get("msg", ""),
@@ -158,6 +168,13 @@ def atualizar(forcar=False):
         L.append(f"atualizados ({len(mudados)}): {', '.join(mudados[:8])}")
     L.append(f"backup em data/backups/{backup.name}")
     return True, "\n".join(L)
+
+
+def _limpar_backups(manter=5):
+    """Cada backup pode ter o orion.exe antigo (MBs): guarda so os ultimos."""
+    if BACKUPS.exists():
+        for velho in sorted(p for p in BACKUPS.iterdir() if p.is_dir())[:-manter]:
+            shutil.rmtree(velho, ignore_errors=True)
 
 
 def reverter():
