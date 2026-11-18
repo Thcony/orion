@@ -14,6 +14,18 @@ const BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 pub trait Http: Send + Sync {
     fn post(&self, url: &str, corpo: &Value) -> Result<(u16, String), String>;
     fn get(&self, url: &str) -> Result<(u16, String), String>;
+    /// Streaming: entrega linha por linha enquanto chega (SSE). `cada` devolve
+    /// false pra parar. Com status != 200 devolve o corpo inteiro como erro.
+    fn post_linhas(&self, url: &str, corpo: &Value, cada: &mut dyn FnMut(&str) -> bool) -> Result<(u16, String), String> {
+        let (s, txt) = self.post(url, corpo)?;
+        if s == 200 {
+            for l in txt.lines() {
+                if !cada(l) { break; }
+            }
+            return Ok((200, String::new()));
+        }
+        Ok((s, txt))
+    }
 }
 
 pub struct Rede {
@@ -36,6 +48,26 @@ impl Http for Rede {
             .send_json(corpo).map_err(|e| e.to_string())?;
         let status = r.status().as_u16();
         Ok((status, r.body_mut().read_to_string().map_err(|e| e.to_string())?))
+    }
+    fn post_linhas(&self, url: &str, corpo: &Value, cada: &mut dyn FnMut(&str) -> bool) -> Result<(u16, String), String> {
+        use std::io::BufRead;
+        let mut r = self.agente.post(url).header("Content-Type", "application/json")
+            .send_json(corpo).map_err(|e| e.to_string())?;
+        let status = r.status().as_u16();
+        if status != 200 {
+            return Ok((status, r.body_mut().read_to_string().unwrap_or_default()));
+        }
+        let mut leitor = std::io::BufReader::new(r.body_mut().as_reader());
+        let mut linha = String::new();
+        loop {
+            linha.clear();
+            match leitor.read_line(&mut linha) {
+                Ok(0) => break,
+                Ok(_) => if !cada(linha.trim_end()) { break },
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Ok((200, String::new()))
     }
     fn get(&self, url: &str) -> Result<(u16, String), String> {
         let mut r = self.agente.get(url).call().map_err(|e| e.to_string())?;

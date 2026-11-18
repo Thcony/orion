@@ -1,67 +1,80 @@
-//! Voz do Orion. Principal: Gemini TTS (Charon). Reserva automatica: vozes
-//! do Windows (SAPI) quando a cota do TTS estoura, a rede cai ou o modelo some.
-//! Mandar mensagem nova corta a fala (barge-in). Erro aqui nunca derruba nada.
+//! Voz do Orion.
+//! Gemini TTS em STREAMING: o audio chega em pedacos e comeca a tocar no
+//! primeiro (com ~0,5 s de folga pra nao picotar). A janela so mostra o
+//! texto quando o som comeca, entao os dois saem juntos.
+//! Reserva: voz do Windows (SAPI) se o Gemini recusar ou a rede cair.
 use crate::cerebro::Http;
 use crate::config::Config;
 use base64::Engine;
 use chrono::Local;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 const MAX_CHARS: usize = 500;
+const ESPERA_PRIMEIRO_AUDIO: Duration = Duration::from_secs(12);
+/// Modelos de voz em ordem. Cada um tem cota propria: se um estoura, vai pro outro.
+const MODELOS_PADRAO: [&str; 2] = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"];
 
-/// O que sai no alto-falante. Separado pra poder testar sem som.
-#[cfg_attr(not(windows), allow(dead_code))] // no Linux (testes) o WAV nao toca
-pub enum Som {
-    Wav(Vec<u8>),
-    Sapi(String),
+type TocarPcm = dyn Fn(Vec<u8>, Receiver<Vec<u8>>, &dyn Fn() -> bool) + Send + Sync;
+type TocarSapi = dyn Fn(&str, &dyn Fn() -> bool) + Send + Sync;
+
+/// Por onde o som sai. Separado pra testar sem alto-falante.
+pub struct AltoFalante {
+    pub pcm: Box<TocarPcm>,
+    pub sapi: Box<TocarSapi>,
 }
 
 pub struct Voz {
     cfg: Config,
     http: Arc<dyn Http>,
-    tocar: Box<dyn Fn(Som) + Send + Sync>,
+    saida: AltoFalante,
     geracao: AtomicU64,
     tocando: AtomicBool,
-    tts_morto: Mutex<Option<String>>, // dia em que o TTS do Gemini recusou
+    mortos: Mutex<(String, HashSet<String>)>, // (dia, modelos que recusaram hoje)
     pub ligada: AtomicBool,
 }
 
-pub fn wav(pcm: &[u8]) -> Vec<u8> {
-    let mut w = Vec::with_capacity(44 + pcm.len());
-    let n = pcm.len() as u32;
-    w.extend_from_slice(b"RIFF");
-    w.extend_from_slice(&(36 + n).to_le_bytes());
-    w.extend_from_slice(b"WAVEfmt ");
-    w.extend_from_slice(&16u32.to_le_bytes());
-    w.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    w.extend_from_slice(&1u16.to_le_bytes()); // mono
-    w.extend_from_slice(&24_000u32.to_le_bytes());
-    w.extend_from_slice(&48_000u32.to_le_bytes()); // bytes/s
-    w.extend_from_slice(&2u16.to_le_bytes());
-    w.extend_from_slice(&16u16.to_le_bytes());
-    w.extend_from_slice(b"data");
-    w.extend_from_slice(&n.to_le_bytes());
-    w.extend_from_slice(pcm);
-    w
+enum Problema {
+    Recusou, // cota/modelo/permissao: nao insiste hoje
+    Rede,
 }
 
 impl Voz {
     pub fn new(cfg: Config, http: Arc<dyn Http>) -> Arc<Self> {
-        Self::com_saida(cfg, http, Box::new(tocar_de_verdade))
+        let sapi_cfg = cfg.clone();
+        Self::com_saida(cfg, http, AltoFalante {
+            pcm: Box::new(tocar_pcm),
+            sapi: Box::new(move |t, cancelado| tocar_sapi(&script_sapi(&sapi_cfg, t), cancelado)),
+        })
     }
 
-    pub fn com_saida(cfg: Config, http: Arc<dyn Http>, tocar: Box<dyn Fn(Som) + Send + Sync>) -> Arc<Self> {
+    pub fn com_saida(cfg: Config, http: Arc<dyn Http>, saida: AltoFalante) -> Arc<Self> {
         let ligada = AtomicBool::new(cfg.voz);
-        Arc::new(Voz { cfg, http, tocar, geracao: AtomicU64::new(0), tocando: AtomicBool::new(false),
-                       tts_morto: Mutex::new(None), ligada })
+        Arc::new(Voz { cfg, http, saida, geracao: AtomicU64::new(0), tocando: AtomicBool::new(false),
+                       mortos: Mutex::new((String::new(), HashSet::new())), ligada })
+    }
+
+    fn modelos_vivos(&self) -> Vec<String> {
+        let hoje = Local::now().format("%Y-%m-%d").to_string();
+        let mut m = self.mortos.lock().unwrap();
+        if m.0 != hoje {
+            *m = (hoje, HashSet::new()); // virou o dia: tenta todos de novo
+        }
+        let mut lista: Vec<String> = Vec::new();
+        for x in std::iter::once(self.cfg.voz_modelo.as_str()).chain(MODELOS_PADRAO) {
+            if !x.is_empty() && !m.1.contains(x) && !lista.iter().any(|y| y == x) {
+                lista.push(x.to_string());
+            }
+        }
+        lista
     }
 
     fn gemini_usavel(&self) -> bool {
-        let hoje = Local::now().format("%Y-%m-%d").to_string();
-        self.cfg.voz_motor == "gemini" && !self.cfg.api_key.is_empty()
-            && self.tts_morto.lock().unwrap().as_deref() != Some(hoje.as_str())
+        self.cfg.voz_motor == "gemini" && !self.cfg.api_key.is_empty() && !self.modelos_vivos().is_empty()
     }
 
     pub fn motor(&self) -> String {
@@ -75,17 +88,19 @@ impl Voz {
     }
 
     pub fn falando(&self) -> bool {
-        self.tocando.load(Ordering::Relaxed) || sapi_ativo()
+        self.tocando.load(Ordering::Relaxed)
     }
 
-    /// Corta a fala atual e invalida a que ainda esta baixando.
+    /// Corta a fala atual e descarta o audio que ainda esta chegando.
     pub fn parar(&self) {
         self.geracao.fetch_add(1, Ordering::SeqCst);
-        parar_de_verdade();
     }
 
-    pub fn falar(self: &Arc<Self>, texto: &str) {
+    /// Fala `texto`. `comecou` e chamado no instante em que o som sai
+    /// (ou quando desiste do Gemini e vai pra voz do Windows).
+    pub fn falar(self: &Arc<Self>, texto: &str, comecou: Box<dyn FnOnce() + Send>) {
         if texto.trim().is_empty() || !self.ligada.load(Ordering::Relaxed) {
+            comecou();
             return;
         }
         self.parar();
@@ -93,184 +108,272 @@ impl Voz {
         let texto: String = texto.chars().take(MAX_CHARS).collect();
         let eu = self.clone();
         std::thread::spawn(move || {
-            let som = if eu.gemini_usavel() {
-                match eu.gemini(&texto) {
-                    Ok(pcm) => Som::Wav(wav(&pcm)),
-                    Err(recusou) => {
-                        if recusou { // cota/modelo/permissao: para de tentar hoje
-                            *eu.tts_morto.lock().unwrap() = Some(Local::now().format("%Y-%m-%d").to_string());
-                        }
-                        Som::Sapi(texto)
+            let cancelado = || eu.geracao.load(Ordering::SeqCst) != minha;
+            let mut comecou = Some(comecou);
+            let mut avisar = || if let Some(f) = comecou.take() { f() };
+
+            if eu.gemini_usavel() {
+                let (tx, rx) = channel::<Vec<u8>>();
+                let problema = Arc::new(Mutex::new(None::<Problema>));
+                let (eu2, t2, p2) = (eu.clone(), texto.clone(), problema.clone());
+                std::thread::spawn(move || {
+                    if let Err(p) = eu2.baixar(&t2, &tx, minha) {
+                        *p2.lock().unwrap() = Some(p);
                     }
+                }); // ao terminar, tx cai e o rx fica sabendo
+                match rx.recv_timeout(ESPERA_PRIMEIRO_AUDIO) {
+                    Ok(primeiro) => {
+                        if cancelado() { return; }
+                        avisar();
+                        eu.tocando.store(true, Ordering::Relaxed);
+                        (eu.saida.pcm)(primeiro, rx, &cancelado);
+                        eu.tocando.store(false, Ordering::Relaxed);
+                        return;
+                    }
+                    Err(RecvTimeoutError::Timeout) => {} // internet lenta: vai de Windows nessa fala
+                    Err(RecvTimeoutError::Disconnected) => {} // baixar() ja marcou quem recusou
                 }
-            } else {
-                Som::Sapi(texto)
-            };
-            if minha != eu.geracao.load(Ordering::SeqCst) {
-                return; // o chefe ja mandou outra coisa enquanto baixava
             }
+            if cancelado() { return; }
+            avisar();
             eu.tocando.store(true, Ordering::Relaxed);
-            (eu.tocar)(som);
+            (eu.saida.sapi)(&texto, &cancelado);
             eu.tocando.store(false, Ordering::Relaxed);
         });
     }
 
-    /// Ok(pcm 16-bit 24 kHz) ou Err(true se o Gemini RECUSOU, false se foi rede).
-    fn gemini(&self, texto: &str) -> Result<Vec<u8>, bool> {
-        let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-                          self.cfg.voz_modelo, self.cfg.api_key);
+    /// Baixa o audio em streaming e manda os pedacos de PCM pelo canal.
+    fn baixar(&self, texto: &str, tx: &Sender<Vec<u8>>, minha: u64) -> Result<(), Problema> {
         let corpo = json!({
             "contents": [{"parts": [{"text": format!("Fale em portugues do Brasil, tom natural e descontraido: {texto}")}]}],
             "generationConfig": {"responseModalities": ["AUDIO"],
                 "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": self.cfg.voz_gemini}}}},
         });
-        let (status, txt) = self.http.post(&url, &corpo).map_err(|_| false)?;
-        if status != 200 {
-            return Err(matches!(status, 400 | 403 | 404 | 429));
+        for modelo in self.modelos_vivos() {
+            let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{modelo}:streamGenerateContent?alt=sse&key={}",
+                              self.cfg.api_key);
+            let mut mandou = false;
+            let r = self.http.post_linhas(&url, &corpo, &mut |linha| {
+                if self.geracao.load(Ordering::SeqCst) != minha { return false; } // chefe cortou
+                let Some(dados) = linha.strip_prefix("data:") else { return true };
+                let Ok(v) = serde_json::from_str::<Value>(dados.trim()) else { return true };
+                for p in v["candidates"][0]["content"]["parts"].as_array().into_iter().flatten() {
+                    if let Some(pcm) = p["inlineData"]["data"].as_str()
+                        .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok()) {
+                        mandou = true;
+                        if tx.send(pcm).is_err() { return false; }
+                    }
+                }
+                true
+            });
+            match r {
+                Ok((200, _)) if mandou => return Ok(()),
+                Ok((200, _)) => return Err(Problema::Rede), // veio vazio
+                Ok((400 | 403 | 404 | 429, _)) => { // esse modelo nao serve hoje: tenta o proximo
+                    self.mortos.lock().unwrap().1.insert(modelo);
+                }
+                Ok(_) | Err(_) => return Err(Problema::Rede),
+            }
         }
-        let v: Value = serde_json::from_str(&txt).map_err(|_| false)?;
-        v["candidates"][0]["content"]["parts"].as_array().into_iter().flatten()
-            .find_map(|p| p["inlineData"]["data"].as_str())
-            .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
-            .ok_or(false)
-    }
-
-    /// Script da voz do Windows (texto embutido com aspas simples escapadas).
-    pub fn script_sapi(&self, texto: &str) -> String {
-        let filtro = if self.cfg.voz_nome.is_empty() {
-            "$_.Culture -like 'pt*'".to_string()
-        } else {
-            format!("$_.Name -like '*{}*'", self.cfg.voz_nome.replace('\'', "''"))
-        };
-        format!("Add-Type -AssemblyName System.Speech; $s=New-Object System.Speech.Synthesis.SpeechSynthesizer; \
-                 $s.Rate={}; $v=$s.GetInstalledVoices().VoiceInfo | Where-Object {{ {filtro} }} | Select-Object -First 1; \
-                 if($v){{$s.SelectVoice($v.Name)}}; $s.Speak('{}')",
-                self.cfg.voz_velocidade.clamp(-10, 10), texto.replace('\'', "''"))
+        Err(Problema::Recusou)
     }
 }
 
-// ---------------- saida de som de verdade ----------------
-static SAPI: Mutex<Option<std::process::Child>> = Mutex::new(None);
-static CFG_SAPI: Mutex<Option<String>> = Mutex::new(None); // ultimo script montado
-
-fn sapi_ativo() -> bool {
-    SAPI.lock().unwrap().as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)))
+/// Script da voz do Windows (texto embutido com aspas simples escapadas).
+pub fn script_sapi(cfg: &Config, texto: &str) -> String {
+    let filtro = if cfg.voz_nome.is_empty() {
+        "$_.Culture -like 'pt*'".to_string()
+    } else {
+        format!("$_.Name -like '*{}*'", cfg.voz_nome.replace('\'', "''"))
+    };
+    format!("Add-Type -AssemblyName System.Speech; $s=New-Object System.Speech.Synthesis.SpeechSynthesizer; \
+             $s.Rate={}; $v=$s.GetInstalledVoices().VoiceInfo | Where-Object {{ {filtro} }} | Select-Object -First 1; \
+             if($v){{$s.SelectVoice($v.Name)}}; $s.Speak('{}')",
+            cfg.voz_velocidade.clamp(-10, 10), texto.replace('\'', "''"))
 }
 
+// ---------------- som de verdade ----------------
+fn tocar_sapi(script: &str, cancelado: &dyn Fn() -> bool) {
+    let Ok(mut c) = crate::tools::powershell_cmd(script).spawn() else { return };
+    while matches!(c.try_wait(), Ok(None)) {
+        if cancelado() {
+            let _ = c.kill();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(60));
+    }
+}
+
+/// Toca PCM 16-bit 24 kHz mono em streaming pelo waveOut do Windows.
 #[cfg(windows)]
-mod win {
-    #[link(name = "winmm")]
-    unsafe extern "system" {
-        pub fn PlaySoundW(som: *const u16, modulo: *mut core::ffi::c_void, flags: u32) -> i32;
-    }
-    pub const SND_MEMORY: u32 = 0x0004;
-    pub const SND_NODEFAULT: u32 = 0x0002;
-}
-
-fn tocar_de_verdade(som: Som) {
-    match som {
-        #[cfg(windows)]
-        Som::Wav(w) => unsafe {
-            // bloqueia so esta thread; PlaySoundW(null) de outra thread corta
-            win::PlaySoundW(w.as_ptr() as *const u16, std::ptr::null_mut(), win::SND_MEMORY | win::SND_NODEFAULT);
-        },
-        #[cfg(not(windows))]
-        Som::Wav(_) => {}
-        Som::Sapi(texto) => {
-            let script = CFG_SAPI.lock().unwrap().clone().unwrap_or_default().replace("{TEXTO}", &texto.replace('\'', "''"));
-            if let Ok(mut c) = crate::tools::powershell_cmd(&script).spawn() {
-                let _ = c.try_wait();
-                *SAPI.lock().unwrap() = Some(c);
-                while sapi_ativo() {
-                    std::thread::sleep(std::time::Duration::from_millis(80));
+fn tocar_pcm(primeiro: Vec<u8>, rx: Receiver<Vec<u8>>, cancelado: &dyn Fn() -> bool) {
+    use windows_sys::Win32::Media::Audio::*;
+    use windows_sys::Win32::Media::MMSYSERR_NOERROR;
+    const FOLGA: usize = 24_000; // 0,5 s guardado antes de comecar
+    let tam = std::mem::size_of::<WAVEHDR>() as u32;
+    unsafe {
+        let fmt = WAVEFORMATEX { wFormatTag: WAVE_FORMAT_PCM as u16, nChannels: 1, nSamplesPerSec: 24_000,
+                                 nAvgBytesPerSec: 48_000, nBlockAlign: 2, wBitsPerSample: 16, cbSize: 0 };
+        let mut h: HWAVEOUT = std::ptr::null_mut();
+        if waveOutOpen(&mut h, WAVE_MAPPER, &fmt, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR {
+            return;
+        }
+        // cada buffer fica numa Box: o endereco nao pode mudar enquanto o Windows toca
+        let mut bufs: Vec<Box<(WAVEHDR, Vec<u8>)>> = Vec::new();
+        let mut enviar = |dados: Vec<u8>, bufs: &mut Vec<Box<(WAVEHDR, Vec<u8>)>>| {
+            if dados.len() < 2 { return; }
+            let mut b = Box::new((WAVEHDR::default(), dados));
+            b.0.lpData = b.1.as_mut_ptr();
+            b.0.dwBufferLength = (b.1.len() & !1) as u32;
+            if waveOutPrepareHeader(h, &mut b.0, tam) == MMSYSERR_NOERROR && waveOutWrite(h, &mut b.0, tam) == MMSYSERR_NOERROR {
+                bufs.push(b);
+            }
+        };
+        let mut pendente = primeiro;
+        let mut tocando = false;
+        loop {
+            if cancelado() { break; }
+            match rx.recv_timeout(Duration::from_millis(40)) {
+                Ok(c) => pendente.extend(c),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    enviar(std::mem::take(&mut pendente), &mut bufs);
+                    break;
+                }
+            }
+            if tocando || pendente.len() >= FOLGA {
+                tocando = true;
+                if !pendente.is_empty() {
+                    enviar(std::mem::take(&mut pendente), &mut bufs);
                 }
             }
         }
+        // espera acabar de tocar (ou o chefe cortar)
+        while !cancelado() && bufs.iter().any(|b| std::ptr::read_volatile(&b.0.dwFlags) & WHDR_DONE == 0) {
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        waveOutReset(h);
+        for b in bufs.iter_mut() {
+            waveOutUnprepareHeader(h, &mut b.0, tam);
+        }
+        waveOutClose(h);
     }
 }
 
-fn parar_de_verdade() {
-    #[cfg(windows)]
-    unsafe {
-        win::PlaySoundW(std::ptr::null(), std::ptr::null_mut(), 0);
+#[cfg(not(windows))]
+fn tocar_pcm(primeiro: Vec<u8>, rx: Receiver<Vec<u8>>, cancelado: &dyn Fn() -> bool) {
+    // sem waveOut: so passa o tempo que o audio duraria (48000 bytes = 1 s)
+    let total = primeiro.len() + rx.iter().map(|c| c.len()).sum::<usize>();
+    let fim = std::time::Instant::now() + Duration::from_secs_f64(total as f64 / 48_000.0);
+    while !cancelado() && std::time::Instant::now() < fim {
+        std::thread::sleep(Duration::from_millis(30));
     }
-    if let Some(mut c) = SAPI.lock().unwrap().take() {
-        let _ = c.kill();
-    }
-}
-
-/// Guarda o modelo do script da voz do Windows (voz e velocidade do .env).
-pub fn preparar_sapi(v: &Voz) {
-    *CFG_SAPI.lock().unwrap() = Some(v.script_sapi("{TEXTO}"));
 }
 
 #[cfg(test)]
 mod testes {
     use super::*;
-    use std::time::Duration;
+    use std::time::Instant;
 
-    struct Falsa(Box<dyn Fn() -> Result<(u16, String), String> + Send + Sync>);
+    type Resposta = Box<dyn Fn(&str) -> Result<(u16, String), String> + Send + Sync>;
+    struct Falsa(Resposta);
     impl Http for Falsa {
-        fn post(&self, _: &str, _: &Value) -> Result<(u16, String), String> { (self.0)() }
+        fn post(&self, url: &str, _: &Value) -> Result<(u16, String), String> { (self.0)(url) }
         fn get(&self, _: &str) -> Result<(u16, String), String> { Ok((200, "{}".into())) }
     }
 
-    fn voz(nome: &str, resp: Box<dyn Fn() -> Result<(u16, String), String> + Send + Sync>) -> (Arc<Voz>, Arc<Mutex<Vec<String>>>) {
+    /// SSE com `n` pedacos de `bytes` cada.
+    fn sse(n: usize, bytes: usize) -> Result<(u16, String), String> {
+        let b = base64::engine::general_purpose::STANDARD.encode(vec![7u8; bytes]);
+        let um = json!({"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "audio/L16;rate=24000", "data": b}}]}}]});
+        Ok((200, (0..n).map(|_| format!("data: {um}\n\n")).collect()))
+    }
+
+    struct Teste { voz: Arc<Voz>, ouviu: Arc<Mutex<Vec<String>>> }
+
+    fn montar(nome: &str, resp: Resposta) -> Teste {
         let d = std::env::temp_dir().join(nome);
         let _ = std::fs::create_dir_all(&d);
         std::fs::write(d.join(".env"), "GEMINI_API_KEY=AIzaT\n").unwrap();
-        let ouvido = Arc::new(Mutex::new(vec![]));
-        let o = ouvido.clone();
-        let v = Voz::com_saida(Config::de(d), Arc::new(Falsa(resp)), Box::new(move |s| o.lock().unwrap().push(match s {
-            Som::Wav(w) => format!("wav:{}:{}", &String::from_utf8_lossy(&w[..4]), w.len()),
-            Som::Sapi(t) => format!("sapi:{t}"),
-        })));
-        (v, ouvido)
+        let ouviu = Arc::new(Mutex::new(vec![]));
+        let (o1, o2) = (ouviu.clone(), ouviu.clone());
+        let saida = AltoFalante {
+            pcm: Box::new(move |primeiro, rx, _| {
+                let total = primeiro.len() + rx.iter().map(|c| c.len()).sum::<usize>();
+                o1.lock().unwrap().push(format!("pcm:{total}"));
+            }),
+            sapi: Box::new(move |t, _| o2.lock().unwrap().push(format!("sapi:{t}"))),
+        };
+        Teste { voz: Voz::com_saida(Config::de(d), Arc::new(Falsa(resp)), saida), ouviu }
     }
 
-    fn audio(pcm_bytes: usize) -> Result<(u16, String), String> {
-        let b = base64::engine::general_purpose::STANDARD.encode(vec![0u8; pcm_bytes]);
-        Ok((200, json!({"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "audio/L16;rate=24000", "data": b}}]}}]}).to_string()))
-    }
-
-    fn espera() { std::thread::sleep(Duration::from_millis(250)); }
-
-    #[test]
-    fn gemini_toca_wav_valido() {
-        let (v, o) = voz("orion_voz_t1", Box::new(|| audio(48_000)));
-        assert_eq!(v.motor(), "Gemini (Charon)");
-        v.falar("Fala, chefe!"); espera();
-        assert_eq!(*o.lock().unwrap(), ["wav:RIFF:48044"]); // 1 s de audio + cabecalho de 44 bytes
+    fn falar_e_esperar(t: &Teste, texto: &str) -> bool {
+        let comecou = Arc::new(AtomicBool::new(false));
+        let c = comecou.clone();
+        t.voz.falar(texto, Box::new(move || c.store(true, Ordering::SeqCst)));
+        std::thread::sleep(Duration::from_millis(300));
+        comecou.load(Ordering::SeqCst)
     }
 
     #[test]
-    fn cota_estourada_vai_pro_windows_e_nao_insiste() {
-        let (v, o) = voz("orion_voz_t2", Box::new(|| Ok((429, "{}".into()))));
-        v.falar("teste cota"); espera();
-        assert_eq!(*o.lock().unwrap(), ["sapi:teste cota"]);
-        assert_eq!(v.motor(), "Windows");
+    fn streaming_junta_todos_os_pedacos_e_avisa_que_comecou() {
+        let t = montar("orion_vz1", Box::new(|_| sse(3, 1000)));
+        assert!(falar_e_esperar(&t, "Fala, chefe!"));
+        assert_eq!(*t.ouviu.lock().unwrap(), ["pcm:3000"]);
     }
 
     #[test]
-    fn sem_rede_fala_pelo_windows_mas_tenta_gemini_de_novo() {
-        let (v, o) = voz("orion_voz_t3", Box::new(|| Err("sem rede".into())));
-        v.falar("offline"); espera();
-        assert_eq!(*o.lock().unwrap(), ["sapi:offline"]);
-        assert_eq!(v.motor(), "Gemini (Charon)"); // rede cai e volta; nao marca morto
+    fn primeiro_modelo_sem_cota_vai_pro_segundo() {
+        let t = montar("orion_vz2", Box::new(|url| if url.contains("3.1") { Ok((429, "{}".into())) } else { sse(1, 500) }));
+        falar_e_esperar(&t, "oi");
+        assert_eq!(*t.ouviu.lock().unwrap(), ["pcm:500"]);
+        assert_eq!(t.voz.modelos_vivos(), ["gemini-2.5-flash-preview-tts"]);
+        assert_eq!(t.voz.motor(), "Gemini (Charon)");
     }
 
     #[test]
-    fn mandou_outra_coisa_no_meio_nao_toca() {
-        let (v, o) = voz("orion_voz_t4", Box::new(|| { std::thread::sleep(Duration::from_millis(200)); audio(100) }));
-        v.falar("frase longa..."); std::thread::sleep(Duration::from_millis(50)); v.parar();
-        std::thread::sleep(Duration::from_millis(400));
-        assert!(o.lock().unwrap().is_empty());
+    fn todos_recusaram_vai_pro_windows_e_nao_insiste() {
+        let t = montar("orion_vz3", Box::new(|_| Ok((429, "{}".into()))));
+        assert!(falar_e_esperar(&t, "teste cota"));
+        assert_eq!(*t.ouviu.lock().unwrap(), ["sapi:teste cota"]);
+        assert_eq!(t.voz.motor(), "Windows");
+    }
+
+    #[test]
+    fn sem_rede_fala_pelo_windows_mas_tenta_gemini_depois() {
+        let t = montar("orion_vz4", Box::new(|_| Err("sem rede".into())));
+        falar_e_esperar(&t, "offline");
+        assert_eq!(*t.ouviu.lock().unwrap(), ["sapi:offline"]);
+        assert_eq!(t.voz.motor(), "Gemini (Charon)");
+    }
+
+    #[test]
+    fn cortou_no_meio_nao_toca_nada() {
+        let t = montar("orion_vz5", Box::new(|_| { std::thread::sleep(Duration::from_millis(250)); sse(1, 100) }));
+        let inicio = Instant::now();
+        t.voz.falar("frase longa", Box::new(|| {}));
+        std::thread::sleep(Duration::from_millis(40));
+        t.voz.parar();
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(t.ouviu.lock().unwrap().is_empty(), "{:?}", t.ouviu.lock().unwrap());
+        assert!(inicio.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn voz_desligada_mostra_texto_na_hora() {
+        let t = montar("orion_vz6", Box::new(|_| sse(1, 10)));
+        t.voz.ligada.store(false, Ordering::Relaxed);
+        let ok = Arc::new(AtomicBool::new(false));
+        let o = ok.clone();
+        t.voz.falar("oi", Box::new(move || o.store(true, Ordering::SeqCst)));
+        assert!(ok.load(Ordering::SeqCst)); // sincrono: nem esperou thread
+        assert!(t.ouviu.lock().unwrap().is_empty());
     }
 
     #[test]
     fn script_windows_escapa_aspas() {
-        let (v, _) = voz("orion_voz_t5", Box::new(|| audio(10)));
-        let s = v.script_sapi("it's ok");
+        let t = montar("orion_vz7", Box::new(|_| sse(1, 10)));
+        let s = script_sapi(&t.voz.cfg, "it's ok");
         assert!(s.contains("Speak('it''s ok')") && s.contains("Culture -like 'pt*'"));
     }
 }

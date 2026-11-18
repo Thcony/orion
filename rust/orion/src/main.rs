@@ -18,6 +18,7 @@ use memoria::Memoria;
 use serde_json::Value;
 use std::f32::consts::TAU;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tools::Ctx;
@@ -52,6 +53,7 @@ enum Tipo {
 enum Evento {
     Saida(Saida),
     Confirmar(String, Value, String, Sender<bool>),
+    VozComecou(u64),
     Fim,
 }
 
@@ -69,6 +71,11 @@ struct App {
     tx: Sender<Evento>,
     rx: Receiver<Evento>,
     linhas: Vec<(Tipo, String)>,
+    /// fala do Orion segurada ate o som comecar (texto e voz saem juntos)
+    segurando: Option<(u64, Instant)>,
+    fila: VecDeque<(Tipo, String)>,
+    prox_fala: u64,
+    egui_ctx: egui::Context,
     entrada: String,
     ocupado: bool,
     pedido: Option<Pedido>,
@@ -108,12 +115,12 @@ fn montar(cfg: Config) -> (Arc<Ctx>, Arc<Cerebro>, Arc<Voz>) {
     let memoria = Arc::new(Mutex::new(Memoria::new(&cfg)));
     let http: Arc<dyn cerebro::Http> = Arc::new(Rede::new());
     let ctx = Arc::new(Ctx { cfg: cfg.clone(), memoria, http: http.clone() });
-    let voz = Voz::new(cfg.clone(), http);
-    voz::preparar_sapi(&voz);
     #[cfg(debug_assertions)] // so em build de teste; o .exe de verdade nunca tem isso
     if std::env::var("ORION_FALSO").is_ok() {
+        let voz = Voz::new(cfg.clone(), Arc::new(teste::Falsa));
         return (ctx, Arc::new(Cerebro::new(cfg, Box::new(teste::Falsa))), voz);
     }
+    let voz = Voz::new(cfg.clone(), http);
     (ctx, Arc::new(Cerebro::new(cfg, Box::new(Rede::new()))), voz)
 }
 
@@ -123,7 +130,14 @@ mod teste {
     /// Gemini de mentira pra testar a janela sem chave e sem rede.
     pub struct Falsa;
     impl crate::cerebro::Http for Falsa {
-        fn post(&self, _: &str, corpo: &Value) -> Result<(u16, String), String> {
+        fn post(&self, url: &str, corpo: &Value) -> Result<(u16, String), String> {
+            if url.contains("streamGenerateContent") { // voz: 1,5 s pra comecar, 2 s de audio
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                use base64::Engine;
+                let b = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 48_000]);
+                let um = json!({"candidates": [{"content": {"parts": [{"inlineData": {"data": b}}]}}]});
+                return Ok((200, format!("data: {um}\n\ndata: {um}\n\n")));
+            }
             let txt = corpo["contents"][0]["parts"][0]["text"].as_str().unwrap_or("");
             let agora = txt.rsplit("AGORA:").next().unwrap_or("").trim().to_string();
             std::thread::sleep(std::time::Duration::from_millis(900)); // simula a rede
@@ -156,6 +170,10 @@ impl App {
             linhas: vec![(Tipo::Info, format!("online · voz: {} · {} chamadas hoje · 'calado' silencia",
                                               voz.motor(), cerebro.restante()))],
             ctx, cerebro, voz, tx, rx,
+            segurando: None,
+            fila: VecDeque::new(),
+            prox_fala: 0,
+            egui_ctx: cc.egui_ctx.clone(),
             entrada: String::new(),
             ocupado: false,
             pedido: None,
@@ -183,6 +201,7 @@ impl App {
         }
         self.entrada.clear();
         self.voz.parar(); // mandou algo novo: corta a fala
+        self.soltar();
         match t.to_lowercase().as_str() {
             "calado" | "cala a boca" | "silencio" | "silêncio" | "voz off" | "/calado" => {
                 self.voz.ligada.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -240,16 +259,35 @@ impl App {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
                 Evento::Saida(Saida::Orion(t)) => {
-                    self.voz.falar(&t);
-                    self.linhas.push((Tipo::Orion, t));
-                    self.estado = Estado::Falando;
+                    self.soltar(); // fala anterior que ainda tava segurada
+                    self.prox_fala += 1;
+                    let id = self.prox_fala;
+                    self.segurando = Some((id, Instant::now()));
+                    let (tx, repintar) = (self.tx.clone(), self.egui_ctx.clone());
+                    self.voz.falar(&t, Box::new(move || {
+                        let _ = tx.send(Evento::VozComecou(id));
+                        repintar.request_repaint();
+                    }));
+                    self.fila.push_back((Tipo::Orion, t));
                     self.desde = Instant::now();
                 }
-                Evento::Saida(Saida::Info(t)) => self.linhas.push((Tipo::Info, t)),
-                Evento::Saida(Saida::Erro(t)) => self.linhas.push((Tipo::Erro, t)),
-                Evento::Confirmar(tool, args, motivo, resp) => self.pedido = Some(Pedido { tool, args, motivo, resp }),
+                Evento::Saida(Saida::Info(t)) => self.mostrar(Tipo::Info, t),
+                Evento::Saida(Saida::Erro(t)) => self.mostrar(Tipo::Erro, t),
+                Evento::Confirmar(tool, args, motivo, resp) => {
+                    self.soltar(); // pergunta so depois do chefe ver o que o Orion disse
+                    self.pedido = Some(Pedido { tool, args, motivo, resp });
+                }
+                Evento::VozComecou(id) => {
+                    if self.segurando.is_some_and(|(s, _)| s == id) {
+                        self.soltar();
+                    }
+                }
                 Evento::Fim => self.ocupado = false,
             }
+        }
+        // voz demorou demais (internet ruim): mostra o texto mesmo assim
+        if self.segurando.is_some_and(|(_, t)| t.elapsed() > Duration::from_secs(8)) {
+            self.soltar();
         }
         if !self.avisou_memoria {
             if let Some(a) = self.ctx.memoria.lock().unwrap().aviso.clone() {
@@ -259,18 +297,32 @@ impl App {
         }
     }
 
+    /// Linha nova: se tem fala segurada, entra na fila atras dela (mantem a ordem).
+    fn mostrar(&mut self, tipo: Tipo, t: String) {
+        if self.segurando.is_some() {
+            self.fila.push_back((tipo, t));
+        } else {
+            self.linhas.push((tipo, t));
+        }
+    }
+
+    fn soltar(&mut self) {
+        self.segurando = None;
+        self.linhas.extend(self.fila.drain(..));
+    }
+
     fn tick(&mut self, dt: f32) {
-        if self.voz.falando() { // orb verde enquanto o audio toca de verdade
-            self.estado = Estado::Falando;
-            self.desde = Instant::now();
-        }
-        // falando dura um pouco depois da fala chegar; depois volta a pensar (se ainda ocupado) ou parar
-        if self.estado == Estado::Falando && self.desde.elapsed() > Duration::from_millis(2500) {
-            self.estado = if self.ocupado { Estado::Pensando } else { Estado::Parado };
-        }
-        if self.estado == Estado::Pensando && !self.ocupado {
-            self.estado = Estado::Parado;
-        }
+        let voz_ligada = self.voz.ligada.load(std::sync::atomic::Ordering::Relaxed);
+        self.estado = if self.voz.falando() {
+            Estado::Falando // verde: so enquanto o som toca de verdade
+        } else if !voz_ligada && self.desde.elapsed() < Duration::from_millis(1200) && !self.linhas.is_empty()
+            && matches!(self.linhas.last(), Some((Tipo::Orion, _))) {
+            Estado::Falando // sem voz: um verde rapido pra mostrar que respondeu
+        } else if self.ocupado || self.segurando.is_some() {
+            Estado::Pensando // amarelo: pensando ou preparando a voz
+        } else {
+            Estado::Parado
+        };
         let alvo = match self.estado {
             Estado::Parado => AZUL,
             Estado::Pensando => AMAR,

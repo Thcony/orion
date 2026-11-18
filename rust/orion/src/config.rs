@@ -98,7 +98,7 @@ impl Config {
             voz: get("ORION_VOZ", "1") == "1",
             voz_motor: get("ORION_VOZ_MOTOR", "gemini"),
             voz_gemini: get("ORION_VOZ_GEMINI", "Charon"),
-            voz_modelo: get("ORION_VOZ_MODELO", "gemini-2.5-flash-preview-tts"),
+            voz_modelo: get("ORION_VOZ_MODELO", ""), // vazio = 3.1 e depois 2.5
             voz_nome: get("ORION_VOZ_NOME", ""),
             voz_velocidade: get("ORION_VOZ_VELOCIDADE", "0").parse().unwrap_or(0),
             root,
