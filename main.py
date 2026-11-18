@@ -13,6 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core import brain, config, guard, memory, scheduler, tools, updater
 from senses import watcher
 
+if os.name == "nt":
+    os.system("")  # liga as cores ANSI no console do Windows
+
 VERDE, AMARELO, VERMELHO, CINZA, RESET = (
     "\033[92m", "\033[93m", "\033[91m", "\033[90m", "\033[0m"
 )
@@ -98,17 +101,35 @@ def main():
 
     if len(sys.argv) > 1 and sys.argv[1] == "modelos":
         try:
-            print("\n".join(brain.listar_modelos()))
+            r = brain.ranquear(brain.listar_modelos())
+            brain.CACHE.unlink(missing_ok=True)
+            print("\n".join(r) or "nenhum modelo de texto liberado pra essa chave")
+            if r:
+                print(f"\n-> uso: {config.MODELO if config.MODELO in r else r[0]}")
         except Exception as e:
             print(f"falhou: {e}")
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "chave":
+        if len(sys.argv) < 3:
+            print("uso: orion chave SUA_CHAVE   (gratis em https://aistudio.google.com/apikey)")
+            return
+        config.salvar_env("GEMINI_API_KEY", sys.argv[2].strip())
+        config.API_KEY = sys.argv[2].strip()
+        try:
+            print(f"chave salva e valida ({len(brain.listar_modelos())} modelos liberados)")
+        except Exception as e:
+            print(f"chave salva, mas o Gemini recusou: {e}")
         return
 
     if len(sys.argv) > 1:
         turno(" ".join(sys.argv[1:]))
         return
 
-    if os.environ.get("ORION_AUTO_UPDATE", "1") == "1":
+    if config.AUTO_UPDATE:
         checar_update()
+    if not config.API_KEY:
+        print(f"{AMARELO}Sem chave do Gemini: roda  orion chave SUA_CHAVE{RESET}")
 
     scheduler.vigiar(lambda t: fala(f"Lembrete: {t}"))
     watcher.vigiar(fala)

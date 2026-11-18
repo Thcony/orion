@@ -89,7 +89,13 @@ New-Item -ItemType Directory -Path $tmp | Out-Null
 $zip = Join-Path $tmp "orion.zip"
 
 Write-Host "  baixando o Orion..." -ForegroundColor Gray
-Invoke-WebRequest "https://codeload.github.com/$Repo/zip/refs/heads/main" -OutFile $zip -UseBasicParsing
+$sha = $null; $msg = ""
+try {
+    $c = Invoke-RestMethod "https://api.github.com/repos/$Repo/commits/main" -Headers @{ "User-Agent" = "Orion-Installer" }
+    $sha = $c.sha; $msg = ($c.commit.message -split "`n")[0]
+} catch { }
+$ref = if ($sha) { $sha } else { "refs/heads/main" }
+Invoke-WebRequest "https://codeload.github.com/$Repo/zip/$ref" -OutFile $zip -UseBasicParsing
 Expand-Archive $zip -DestinationPath $tmp -Force
 $raiz = (Get-ChildItem $tmp -Directory | Select-Object -First 1).FullName
 if (Test-Path (Join-Path $raiz "orion\main.py")) { $raiz = Join-Path $raiz "orion" }
@@ -105,6 +111,13 @@ Get-ChildItem $raiz -Recurse -File | ForEach-Object {
     Copy-Item $_.FullName $alvo -Force
 }
 Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+
+# Registra a versao instalada (senao o auto-update acha que ta desatualizado)
+if ($sha) {
+    New-Item -ItemType Directory -Path (Join-Path $Destino "data") -Force | Out-Null
+    @{ sha = $sha; msg = $msg; quando = (Get-Date -Format s) } | ConvertTo-Json |
+        Set-Content (Join-Path $Destino "data\versao.json") -Encoding UTF8
+}
 
 # Dependencia unica
 Write-Host "  instalando psutil..." -ForegroundColor Gray

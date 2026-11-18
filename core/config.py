@@ -5,13 +5,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 DATA.mkdir(exist_ok=True)
+ENV = ROOT / ".env"
+
+# Valores de exemplo do .env.example: se aparecerem, valem como vazio.
+PLACEHOLDER = ("SEU_USUARIO", "cole_sua_chave")
 
 
 def _carregar_env():
-    f = ROOT / ".env"
-    if not f.exists():
+    if not ENV.exists():
         return
-    for linha in f.read_text(encoding="utf-8").splitlines():
+    for linha in ENV.read_text(encoding="utf-8-sig", errors="replace").splitlines():
         linha = linha.strip()
         if not linha or linha.startswith("#") or "=" not in linha:
             continue
@@ -19,23 +22,53 @@ def _carregar_env():
         os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
+def _env(nome, padrao=""):
+    v = os.environ.get(nome, "").strip()
+    if not v or any(p in v for p in PLACEHOLDER):
+        return padrao
+    return v
+
+
+def _documentos():
+    """Pasta Documentos real, respeitando redirecionamento do OneDrive."""
+    if os.name == "nt":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as k:
+                p = Path(os.path.expandvars(winreg.QueryValueEx(k, "Personal")[0]))
+                if p.is_dir():
+                    return p
+        except OSError:
+            pass
+    return Path.home() / "Documents"
+
+
 _carregar_env()
 
-API_KEY = os.environ.get("GEMINI_API_KEY", "")
+API_KEY = _env("GEMINI_API_KEY")
+MODELO = _env("ORION_MODELO", "gemini-2.5-flash-lite")
+MODELO_RESERVA = _env("ORION_MODELO_RESERVA")  # vazio = descobre sozinho
+VAULT = Path(_env("ORION_VAULT", str(_documentos() / "Orion-Vault")))
+CHEFE = _env("ORION_CHEFE", "chefe")
+ORCAMENTO_DIA = int(_env("ORION_ORCAMENTO_DIA", "400"))
+INTERVALO_MIN = float(_env("ORION_INTERVALO_MIN", "1.5"))
+TURNOS_CONTEXTO = int(_env("ORION_TURNOS_CONTEXTO", "8"))
+SEM_FREIO = _env("ORION_SEM_FREIO", "0") == "1"
+AUTO_UPDATE = _env("ORION_AUTO_UPDATE", "1") == "1"
 
-# Flash-Lite = maior folga diaria no free tier. Troque se quiser.
-MODELO = os.environ.get("ORION_MODELO", "gemini-2.5-flash-lite")
-MODELO_RESERVA = os.environ.get("ORION_MODELO_RESERVA", "gemini-2.0-flash")
 
-# Obsidian: onde ficam as conversas e a memoria. Nada sai da maquina.
-VAULT = Path(os.environ.get("ORION_VAULT", str(Path.home() / "Documents" / "Orion-Vault")))
-
-CHEFE = os.environ.get("ORION_CHEFE", "chefe")
-
-# Economia de free tier
-ORCAMENTO_DIA = int(os.environ.get("ORION_ORCAMENTO_DIA", "400"))
-INTERVALO_MIN = float(os.environ.get("ORION_INTERVALO_MIN", "1.5"))
-TURNOS_CONTEXTO = int(os.environ.get("ORION_TURNOS_CONTEXTO", "8"))
-
-# Modo: se True, acoes destrutivas rodam sem perguntar (NAO recomendado)
-SEM_FREIO = os.environ.get("ORION_SEM_FREIO", "0") == "1"
+def salvar_env(chave, valor):
+    """Grava/atualiza uma variavel no .env sem mexer no resto."""
+    linhas = ENV.read_text(encoding="utf-8-sig").splitlines() if ENV.exists() else []
+    novo, achou = [], False
+    for l in linhas:
+        if l.strip().split("=", 1)[0].strip() == chave:
+            novo.append(f"{chave}={valor}")
+            achou = True
+        else:
+            novo.append(l)
+    if not achou:
+        novo.append(f"{chave}={valor}")
+    ENV.write_text("\n".join(novo) + "\n", encoding="utf-8")
+    os.environ[chave] = valor

@@ -41,7 +41,7 @@ def _req(url, timeout=20, bruto=False):
 def versao_local():
     if VERSAO.exists():
         try:
-            return json.loads(VERSAO.read_text(encoding="utf-8"))
+            return json.loads(VERSAO.read_text(encoding="utf-8-sig"))
         except Exception:
             pass
     return {"sha": None, "quando": None}
@@ -79,10 +79,12 @@ def _hash(p):
         return ""
 
 
-def _baixar_extrair(destino):
-    url = f"https://codeload.github.com/{REPO}/zip/refs/heads/{BRANCH}"
+def _baixar_extrair(destino, sha=None):
+    # por SHA exato: o cache do GitHub nunca entrega versao velha
+    ref = sha or f"refs/heads/{BRANCH}"
+    url = f"https://codeload.github.com/{REPO}/zip/{ref}"
     if TOKEN:
-        url = f"https://api.github.com/repos/{REPO}/zipball/{BRANCH}"
+        url = f"https://api.github.com/repos/{REPO}/zipball/{sha or BRANCH}"
     dados = _req(url, timeout=120, bruto=True)
     z = Path(destino) / "orion.zip"
     z.write_bytes(dados)
@@ -107,7 +109,7 @@ def atualizar(forcar=False):
     alvo = config.ROOT
     with tempfile.TemporaryDirectory() as tmp:
         try:
-            novo = _baixar_extrair(tmp)
+            novo = _baixar_extrair(tmp, info["sha"] if isinstance(info, dict) else None)
         except Exception as e:
             return False, f"download falhou: {type(e).__name__}: {e}"
 
@@ -179,6 +181,10 @@ def reverter():
 
 
 def reiniciar():
-    """Re-executa o processo com o codigo novo carregado."""
+    """Re-executa com o codigo novo. No Windows o execv solta o console,
+    entao roda como filho e espera."""
+    import subprocess
     import sys
+    if os.name == "nt":
+        raise SystemExit(subprocess.call([sys.executable] + sys.argv))
     os.execv(sys.executable, [sys.executable] + sys.argv)

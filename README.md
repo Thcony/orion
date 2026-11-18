@@ -20,10 +20,11 @@ No PowerShell:
 Baixa, instala o psutil, pede a chave do Gemini, poe no PATH.
 Rodar a mesma linha de novo = atualizar, preservando `.env` e memoria.
 
-Depois: `orion` em qualquer terminal.
+Depois: `orion` em qualquer terminal. Trocar a chave: `orion chave SUA_CHAVE`.
 
-Confirme o modelo com `orion modelos` (os IDs do Gemini mudam) e
-ajuste `ORION_MODELO` no `.env` se precisar.
+Se o modelo padrao sumir (os IDs do Gemini mudam), ele descobre
+sozinho um que a chave aceita e guarda em `data/modelo.json`.
+`orion modelos` lista e reseta essa escolha.
 
 ## Atualizar
 
