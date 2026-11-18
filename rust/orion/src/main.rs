@@ -490,7 +490,45 @@ impl eframe::App for App {
     }
 }
 
-fn main() -> eframe::Result {
+/// Erro na tela + data/erro.log. Sem isso o .exe (sem console) morria calado.
+fn avisar_erro(msg: &str) {
+    let cfg = Config::carregar();
+    let linha = format!("[{}] {msg}\n", chrono::Local::now().format("%d/%m/%Y %H:%M:%S"));
+    let log = cfg.data.join("erro.log");
+    let _ = std::fs::OpenOptions::new().create(true).append(true).open(&log)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, linha.as_bytes()));
+    let texto = format!("{msg}\n\nSalvo em: {}\nManda isso pro Claude.", log.display());
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn MessageBoxW(janela: *mut core::ffi::c_void, texto: *const u16, titulo: *const u16, tipo: u32) -> i32;
+        }
+        let w = |t: &str| t.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        unsafe { MessageBoxW(std::ptr::null_mut(), w(&texto).as_ptr(), w("Orion deu erro").as_ptr(), 0x10) };
+    }
+    #[cfg(not(windows))]
+    eprintln!("Orion deu erro: {texto}");
+}
+
+fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        let onde = info.location().map(|l| format!(" ({}:{})", l.file(), l.line())).unwrap_or_default();
+        let msg = info.payload().downcast_ref::<&str>().map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "erro desconhecido".into());
+        avisar_erro(&format!("travou: {msg}{onde}"));
+    }));
+    #[cfg(debug_assertions)]
+    if std::env::var("ORION_PANICO").is_ok() {
+        panic!("teste do aviso de erro");
+    }
+    if let Err(e) = iniciar() {
+        avisar_erro(&format!("nao consegui abrir a janela: {e}"));
+    }
+}
+
+fn iniciar() -> eframe::Result {
     let opcoes = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([460.0, 640.0])
