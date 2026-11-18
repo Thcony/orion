@@ -144,6 +144,7 @@ def main():
     if not config.API_KEY:
         print(f"{AMARELO}Sem chave do Gemini: roda  orion chave SUA_CHAVE{RESET}")
 
+    memory.marcar_inicio()
     scheduler.vigiar(lambda t: fala(f"Lembrete: {t}"))
     watcher.vigiar(fala)
 
@@ -160,6 +161,11 @@ def main():
             break
         if not e:
             continue
+        if e.lower() in ("lembra disso", "salva a memoria", "guarda isso"):
+            ok = memory.consolidar()
+            memory.marcar_inicio() if ok else None
+            print(f"{CINZA}{'memoria atualizada' if ok else 'nada novo pra guardar'}{RESET}")
+            continue
         if e.lower() in ("sair", "exit", "quit"):
             break
         voz.parar()  # cortou a fala ao mandar algo novo
@@ -173,7 +179,11 @@ def main():
             continue
         turno(e)
 
-    fala("Fechando. Ta tudo no vault.")
+    voz.parar()
+    print(f"{CINZA}guardando o que importa da conversa...{RESET}")
+    if memory.consolidar():
+        print(f"{CINZA}memoria atualizada: {memory.RESUMO}{RESET}")
+    print(f"{VERDE}Orion:{RESET} Fechando. Ate mais, {config.CHEFE}.")
 
 
 if __name__ == "__main__":

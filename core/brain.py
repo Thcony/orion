@@ -273,3 +273,34 @@ def pesquisar(pergunta):
                 fontes.append(f"- {w['title']}")
         return texto.strip() + ("\n\nFontes:\n" + "\n".join(fontes) if fontes else "")
     return "nenhum modelo liberou a busca agora (cota ou modelo sem suporte)"
+
+
+def resumir(memoria_atual, conversa):
+    """Funde a conversa nova na memoria de longo prazo. Devolve texto ou None."""
+    if not config.API_KEY or not orcamento.pode() or not conversa.strip():
+        return None
+    corpo = {
+        "contents": [{"role": "user", "parts": [{"text":
+            "Voce mantem a memoria de longo prazo do Orion sobre o chefe.\n"
+            "Atualize o documento abaixo com o que for DURAVEL da conversa nova: "
+            "fatos sobre ele, projetos, preferencias, pedidos em aberto. "
+            "Ignore papo passageiro. Mantenha o que ja existe, corrija o que mudou. "
+            "Markdown, secoes '## Sobre o chefe', '## Projetos', '## Pendencias', "
+            "'## Resumo das conversas' (1 linha por dia, com data). Max 2500 caracteres. "
+            "Responda SO o documento.\n\n"
+            f"DOCUMENTO ATUAL:\n{memoria_atual}\n\nCONVERSA NOVA:\n{conversa}"}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2048},
+    }
+    cache = _cache()
+    mortos = set(cache.get("mortos", []))
+    for modelo in [m for m in dict.fromkeys([config.MODELO, cache.get("modelo"), config.MODELO_RESERVA])
+                   if m and m not in mortos]:
+        try:
+            r = _post(modelo, corpo)
+            orcamento.gastar()
+            t = _texto(r).strip()
+            t = re.sub(r"^```(?:markdown|md)?\s*|\s*```$", "", t).strip()
+            return t if t.startswith("#") else "# Orion - Memoria\n\n" + t
+        except Exception:
+            continue
+    return None

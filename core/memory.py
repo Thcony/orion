@@ -89,6 +89,38 @@ def resumo():
         return ""
 
 
+_inicio_sessao = None
+
+
+def marcar_inicio():
+    """Guarda quantos turnos ja existiam, pra resumir so o que e novo."""
+    global _inicio_sessao
+    _semear()
+    _inicio_sessao = len(_buffer)
+
+
+def turnos_da_sessao():
+    _semear()
+    return list(_buffer)[_inicio_sessao or 0:]
+
+
+def consolidar():
+    """Funde a sessao na memoria de longo prazo. True se gravou."""
+    from . import brain
+    novos = turnos_da_sessao()
+    if len(novos) < 2:
+        return False
+    texto = brain.resumir(resumo(), "\n".join(novos))
+    if not texto:
+        return False
+    try:
+        atualizar_resumo(texto)
+        return True
+    except OSError as e:
+        _falhou(e)
+        return False
+
+
 def atualizar_resumo(texto):
     _init()
     RESUMO.write_text(texto, encoding="utf-8")
