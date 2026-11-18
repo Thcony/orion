@@ -220,7 +220,7 @@ fn tocar_pcm(primeiro: Vec<u8>, rx: Receiver<Vec<u8>>, cancelado: &dyn Fn() -> b
         }
         // cada buffer fica numa Box: o endereco nao pode mudar enquanto o Windows toca
         let mut bufs: Vec<Box<(WAVEHDR, Vec<u8>)>> = Vec::new();
-        let mut enviar = |dados: Vec<u8>, bufs: &mut Vec<Box<(WAVEHDR, Vec<u8>)>>| {
+        let enviar = |dados: Vec<u8>, bufs: &mut Vec<Box<(WAVEHDR, Vec<u8>)>>| {
             if dados.len() < 2 { return; }
             let mut b = Box::new((WAVEHDR::default(), dados));
             b.0.lpData = b.1.as_mut_ptr();
@@ -249,7 +249,8 @@ fn tocar_pcm(primeiro: Vec<u8>, rx: Receiver<Vec<u8>>, cancelado: &dyn Fn() -> b
             }
         }
         // espera acabar de tocar (ou o chefe cortar)
-        while !cancelado() && bufs.iter().any(|b| std::ptr::read_volatile(&b.0.dwFlags) & WHDR_DONE == 0) {
+        // WAVEHDR e packed: sem referencia ao campo, so ponteiro cru (o endereco real e alinhado, vem da Box)
+        while !cancelado() && bufs.iter().any(|b| std::ptr::read_volatile(std::ptr::addr_of!(b.0.dwFlags)) & WHDR_DONE == 0) {
             std::thread::sleep(Duration::from_millis(30));
         }
         waveOutReset(h);
