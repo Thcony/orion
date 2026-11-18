@@ -3,6 +3,7 @@ import json
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import date
 
@@ -233,46 +234,96 @@ def pensar(entrada, tools_desc):
             "acoes": []}
 
 
-def pesquisar(pergunta):
-    """Busca no Google via grounding do Gemini. Devolve resumo + fontes."""
+def _simples(texto, max_tokens=1024):
+    """Chamada sem tools e sem JSON, com a mesma fila de modelos. (texto, erros)."""
     global _ultima_chamada
+    corpo = {"contents": [{"role": "user", "parts": [{"text": texto}]}],
+             "generationConfig": {"temperature": 0.3, "maxOutputTokens": max_tokens}}
+    return _tentar(corpo)
+
+
+def _tentar(corpo):
+    global _ultima_chamada
+    cache = _cache()
+    mortos = set(cache.get("mortos", []))
+    fila = [m for m in dict.fromkeys([cache.get("modelo"), config.MODELO, config.MODELO_RESERVA])
+            if m and m not in mortos]
+    erros = []
+    for modelo in fila:
+        espera = config.INTERVALO_MIN - (time.time() - _ultima_chamada)
+        if espera > 0:
+            time.sleep(espera)
+        try:
+            r = _post(modelo, corpo)
+            _ultima_chamada = time.time()
+            orcamento.gastar()
+            return r, erros
+        except urllib.error.HTTPError as e:
+            _ultima_chamada = time.time()
+            msg = e.read().decode("utf-8", "ignore")
+            try:
+                msg = json.loads(msg)["error"]["message"]
+            except Exception:
+                pass
+            erros.append(f"{modelo}: {e.code} {msg[:120]}")
+        except Exception as e:
+            erros.append(f"{modelo}: {type(e).__name__}")
+    return None, erros
+
+
+def pesquisar(pergunta):
+    """1) busca do Google via Gemini. 2) se nao rolar, DuckDuckGo + Gemini resume."""
     if not config.API_KEY:
         return "sem chave do Gemini (orion chave SUA_CHAVE)"
     if not orcamento.pode():
         return "bati o teto de chamadas de hoje"
-    corpo = {
-        "contents": [{"role": "user", "parts": [{"text":
-            f"Pesquise e responda em portugues do Brasil, curto e direto: {pergunta}"}]}],
-        "tools": [{"google_search": {}}],
-        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1024},
-    }
-    cache = _cache()
-    mortos = set(cache.get("mortos", []))
-    fila = [m for m in dict.fromkeys([config.MODELO, cache.get("modelo"), config.MODELO_RESERVA])
-            if m and m not in mortos]
-    for modelo in fila:
-        try:
-            r = _post(modelo, corpo)
-        except urllib.error.HTTPError as e:
-            if e.code in (400, 404, 429, 500, 503):
-                continue  # modelo sem busca, cota ou fora do ar: tenta o proximo
-            return f"busca falhou ({e.code})"
-        except Exception as e:
-            return f"sem rede pra pesquisar: {type(e).__name__}"
-        _ultima_chamada = time.time()
-        orcamento.gastar()
-        try:
-            texto = _texto(r)
-        except RuntimeError as e:
-            return str(e)
-        meta = (r.get("candidates") or [{}])[0].get("groundingMetadata") or {}
-        fontes = []
-        for c in meta.get("groundingChunks", [])[:5]:
-            w = c.get("web") or {}
-            if w.get("title"):
-                fontes.append(f"- {w['title']}")
-        return texto.strip() + ("\n\nFontes:\n" + "\n".join(fontes) if fontes else "")
-    return "nenhum modelo liberou a busca agora (cota ou modelo sem suporte)"
+
+    if not _cache().get("sem_grounding"):
+        r, erros = _tentar({
+            "contents": [{"role": "user", "parts": [{"text":
+                f"Pesquise e responda em portugues do Brasil, curto e direto: {pergunta}"}]}],
+            "tools": [{"google_search": {}}],
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1024},
+        })
+        if r:
+            try:
+                texto = _texto(r)
+                meta = (r.get("candidates") or [{}])[0].get("groundingMetadata") or {}
+                fontes = [f"- {c['web']['title']}" for c in meta.get("groundingChunks", [])[:5]
+                          if (c.get("web") or {}).get("title")]
+                return texto.strip() + ("\n\nFontes:\n" + "\n".join(fontes) if fontes else "")
+            except RuntimeError:
+                pass
+        # se TODOS falharam por algo que nao e rede/cota, a chave nao tem busca: nao insiste
+        if erros and all((" 400 " in x or " 403 " in x) for x in erros):
+            _salvar_cache(sem_grounding=True)
+    else:
+        erros = ["busca do Gemini desligada pra essa chave (cache)"]
+
+    # plano B
+    from . import busca
+    try:
+        res = busca.buscar(pergunta)
+    except Exception as e:
+        return ("nao consegui pesquisar.\n  Gemini: " + "; ".join(erros or ["?"]) +
+                f"\n  DuckDuckGo: {e}")
+    if not res:
+        return "a busca nao trouxe nada"
+    trechos = "\n".join(f"[{i+1}] {x['titulo']}: {x['trecho']}" for i, x in enumerate(res))
+    pagina = busca.texto_pagina(res[0]["url"])
+    if pagina:
+        trechos += f"\n\nTEXTO DA PAGINA [1]:\n{pagina}"
+    r, _ = _simples(
+        "Com base SO nestes resultados de busca, responda em portugues do Brasil, curto e "
+        f"direto, a pergunta: {pergunta}\nSe os trechos nao tiverem o dado, diga isso.\n\n{trechos}")
+    fontes = "\n".join(f"- {x['titulo']} ({urllib.parse.urlparse(x['url']).netloc})" for x in res[:4])
+    try:
+        resposta = _texto(r).strip() if r else None
+    except RuntimeError:
+        resposta = None
+    if not resposta:  # sem cota pra resumir: entrega os trechos crus
+        resposta = "Achei isso:\n" + "\n".join(f"- {x['titulo']}: {x['trecho'][:150]}" for x in res[:3])
+    return resposta + "\n\nFontes:\n" + fontes
 
 
 def resumir(memoria_atual, conversa):

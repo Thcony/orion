@@ -54,7 +54,10 @@ def rodar_acoes(acoes):
                 continue
 
         res = tools.executar(tool, args)
-        if tool == "pesquisar":
+        if tool == "pesquisar" and res.startswith("nao consegui pesquisar"):
+            fala("Nao consegui pesquisar agora, chefe.")
+            print(f"{CINZA}{res}{RESET}")
+        elif tool == "pesquisar":
             fala(res.split("\n\nFontes:")[0])
             if "\n\nFontes:" in res:
                 print(f"{CINZA}Fontes:{res.split(chr(10)*2 + 'Fontes:')[1]}{RESET}")
