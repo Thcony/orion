@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from core import brain, config, guard, memory, scheduler, tools, updater
+from core import agente, brain, config, guard, memory, scheduler, tools, updater
 from senses import watcher, voz
 
 if os.name == "nt":
@@ -33,62 +33,27 @@ def confirmar(pergunta):
         return False
 
 
-def rodar_acoes(acoes):
-    for a in acoes:
-        tool = a.get("tool", "")
-        args = a.get("args", {}) or {}
-        nivel, motivo = guard.avaliar(tool, args)
+def _dizer(texto, tipo="info"):
+    if tipo == "orion":
+        print(f"{VERDE}Orion:{RESET} {texto}")
+    elif tipo == "erro":
+        print(f"{VERMELHO}{texto}{RESET}")
+    elif tipo == "aviso":
+        print(f"{AMARELO}{texto}{RESET}")
+    else:
+        print(f"{CINZA}{texto}{RESET}")
 
-        if nivel == guard.BLOQUEIO:
-            print(f"{VERMELHO}[bloqueado]{RESET} {tool}: {motivo}")
-            memory.registrar_acao(tool, args, f"BLOQUEADO: {motivo}")
-            continue
 
-        if nivel == guard.CONFIRMA and not config.SEM_FREIO:
-            print(f"{CINZA}  {tool}({args}){RESET}")
-            if motivo:
-                print(f"{AMARELO}  aviso: {motivo}{RESET}")
-            if not confirmar(f"Rodo {tool}?"):
-                print(f"{CINZA}  pulei{RESET}")
-                memory.registrar_acao(tool, args, "recusado pelo chefe")
-                continue
-
-        res = tools.executar(tool, args)
-        if tool == "pesquisar" and res.startswith("nao consegui pesquisar"):
-            fala("Nao consegui pesquisar agora, chefe.")
-            print(f"{CINZA}{res}{RESET}")
-        elif tool == "pesquisar":
-            fala(res.split("\n\nFontes:")[0])
-            if "\n\nFontes:" in res:
-                print(f"{CINZA}Fontes:{res.split(chr(10)*2 + 'Fontes:')[1]}{RESET}")
-        else:
-            print(f"{CINZA}{res}{RESET}")
-        memory.registrar_acao(tool, args, res)
+def _confirmar(tool, args, motivo):
+    print(f"{CINZA}  {tool}({args}){RESET}")
+    if motivo:
+        print(f"{AMARELO}  aviso: {motivo}{RESET}")
+    return confirmar(f"Rodo {tool}?")
 
 
 def turno(entrada):
-    memory.registrar(config.CHEFE, entrada)
-    r = brain.pensar(entrada, tools.DESCRICAO)
-    f = r.get("fala") or ""
-    if f:
-        fala(f)
-        memory.registrar("Orion", f)
-    rodar_acoes(r.get("acoes") or [])
-
-
-def checar_update(silencioso=True):
-    tem, info = updater.tem_update()
-    if tem:
-        msg = info["msg"] if isinstance(info, dict) else ""
-        print(f"{AMARELO}[update disponivel]{RESET} {msg}")
-        if confirmar("Atualizo agora?"):
-            ok, det = updater.atualizar()
-            print(f"{CINZA}{det}{RESET}")
-            if ok:
-                fala("Codigo novo no lugar. Reiniciando.")
-                updater.reiniciar()
-    elif not silencioso:
-        print(f"{CINZA}{info if isinstance(info, str) else 'sem novidade'}{RESET}")
+    from core import agente
+    agente.responder(entrada, _dizer, _confirmar, voz.falar)
 
 
 def main():
@@ -117,6 +82,16 @@ def main():
                 print(f"\n-> uso: {config.MODELO if config.MODELO in r else r[0]}")
         except Exception as e:
             print(f"falhou: {e}")
+        return
+
+    if not (len(sys.argv) > 1 and sys.argv[1] in ("atualizar", "update", "reverter")):
+        msg = updater.garantir_deps()
+        if msg:
+            print(f"{CINZA}{msg}{RESET}")
+
+    if len(sys.argv) > 1 and sys.argv[1] in ("janela", "gui"):
+        from ui import janela
+        janela.abrir()
         return
 
     if len(sys.argv) > 1 and sys.argv[1] == "vozes":

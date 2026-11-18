@@ -119,9 +119,9 @@ if ($sha) {
         Set-Content (Join-Path $Destino "data\versao.json") -Encoding UTF8
 }
 
-# Dependencia unica
-Write-Host "  instalando psutil..." -ForegroundColor Gray
-& $py -m pip install --quiet --disable-pip-version-check --user psutil 2>&1 | Out-Null
+# Dependencias (pequenas)
+Write-Host "  instalando dependencias..." -ForegroundColor Gray
+& $py -m pip install --quiet --disable-pip-version-check --user -r (Join-Path $Destino "requirements.txt") 2>&1 | Out-Null
 
 # .env
 $envf = Join-Path $Destino ".env"
@@ -149,4 +149,4 @@ if ($novo) {
 } else {
     Write-Host "  Atualizado. .env e memoria preservados." -ForegroundColor Cyan
 }
-Write-Host "  comandos: orion | orion atualizar | orion versao | orion reverter | orion modelos`n" -ForegroundColor Gray
+Write-Host "  comandos: orion janela | orion | orion atualizar | orion versao | orion reverter`n" -ForegroundColor Gray

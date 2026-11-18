@@ -188,3 +188,41 @@ def reiniciar():
     if os.name == "nt":
         raise SystemExit(subprocess.call([sys.executable] + sys.argv))
     os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+def garantir_deps():
+    """Roda pip quando o requirements.txt muda (o update so copia codigo).
+    Sem rede, tenta de novo so no dia seguinte pra nao atrasar o boot."""
+    import subprocess
+    import sys
+    from datetime import date
+    req = config.ROOT / "requirements.txt"
+    marca = config.DATA / "deps.json"
+    if not req.exists():
+        return None
+    h = hashlib.sha256(req.read_bytes()).hexdigest()
+    try:
+        m = json.loads(marca.read_text(encoding="utf-8-sig"))
+    except Exception:
+        m = {}
+    if m.get("hash") == h or m.get("falhou") == f"{h}:{date.today()}":
+        return None
+    cmd = [sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check"]
+    if sys.prefix == sys.base_prefix:  # fora de venv; dentro, --user quebra
+        cmd.append("--user")
+    try:
+        r = subprocess.run(cmd + ["-r", str(req)],
+                           capture_output=True, text=True, timeout=900)
+        ok = r.returncode == 0
+        erro = (r.stderr.strip().splitlines() or ["?"])[-1][:200]
+    except Exception as e:
+        ok, erro = False, str(e)
+    if ok:
+        marca.write_text(json.dumps({"hash": h}), encoding="utf-8")
+        import importlib
+        import site
+        site.addsitedir(site.getusersitepackages())  # vale ja nesta execucao
+        importlib.invalidate_caches()
+        return "dependencias atualizadas"
+    marca.write_text(json.dumps({"falhou": f"{h}:{date.today()}"}), encoding="utf-8")
+    return f"nao instalei dependencias ({erro}); tento amanha"

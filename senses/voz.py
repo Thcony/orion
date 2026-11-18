@@ -22,6 +22,7 @@ _proc = None
 _ok = None
 _geracao = 0           # cada fala nova invalida a anterior (barge-in)
 _tts_morto = None      # dia em que a cota do TTS estourou
+_tocando = False
 MAX_CHARS = 500
 TMP = Path(tempfile.gettempdir())
 
@@ -114,12 +115,16 @@ def _gemini_usavel():
 
 
 def _thread_gemini(texto, minha):
-    global _tts_morto
+    global _tts_morto, _tocando
     try:
         pcm = _gemini_pcm(texto)
         if minha != _geracao:
             return  # chefe ja mandou outra coisa
-        _tocar(_wav(pcm, TMP / "orion_fala.wav"))
+        _tocando = True
+        try:
+            _tocar(_wav(pcm, TMP / "orion_fala.wav"))
+        finally:
+            _tocando = False
     except urllib.error.HTTPError as e:
         if e.code in (429, 404, 403):
             _tts_morto = str(date.today())  # para de tentar hoje, vai de SAPI
@@ -140,6 +145,10 @@ def falar(texto):
         threading.Thread(target=_thread_gemini, args=(texto, _geracao), daemon=True).start()
     else:
         _sapi(texto)
+
+
+def falando():
+    return _tocando or (_proc is not None and _proc.poll() is None)
 
 
 def motor_atual():

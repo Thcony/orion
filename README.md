@@ -26,6 +26,15 @@ Se o modelo padrao sumir (os IDs do Gemini mudam), ele descobre
 sozinho um que a chave aceita e guarda em `data/modelo.json`.
 `orion modelos` lista e reseta essa escolha.
 
+## Janela
+
+    orion janela
+
+Chat com orb animado (azul parado, amarelo pensando, verde falando).
+Arraste arquivo pra dentro (ou botao +): imagem, PDF e audio vao direto
+pro Gemini ver; texto e codigo ele le. Acao destrutiva abre confirmacao.
+Fechar a janela salva a memoria da conversa.
+
 ## Atualizar
 
     orion atualizar     # baixa e aplica

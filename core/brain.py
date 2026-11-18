@@ -30,6 +30,10 @@ Regras:
 - Nao sabe o caminho de um app? Usa achar_app primeiro.
 - Hora, data e lembrete sao locais: usa a tool, nao chuta.
 - Se o pedido for vago, pergunta na "fala" e deixa "acoes" vazio.
+- Precisa LER a saida das acoes pra responder (arquivo, processos, info do sistema,
+  saida de comando)? Poe "ver_resultado": true no JSON; eu te devolvo os resultados
+  e voce responde. Abrir/fechar app, wallpaper, lembrete: nao precisa.
+- Arquivo anexado pelo chefe ja vem junto da mensagem: responda direto sobre ele.
 """
 
 
@@ -146,7 +150,37 @@ def _texto(r):
     return t
 
 
-def pensar(entrada, tools_desc):
+MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".webp": "image/webp", ".heic": "image/heic", ".pdf": "application/pdf",
+        ".mp3": "audio/mp3", ".wav": "audio/wav"}
+TEXTO = {".txt", ".md", ".py", ".lua", ".luau", ".js", ".ts", ".json", ".csv", ".html",
+         ".css", ".log", ".ini", ".cfg", ".xml", ".yml", ".yaml", ".bat", ".ps1", ".toml"}
+MAX_INLINE = 15 * 1024 * 1024
+
+
+def partes_anexo(caminho):
+    """Converte um arquivo em parts do Gemini. Imagem/PDF/audio vao inline."""
+    import base64
+    from pathlib import Path
+    f = Path(caminho)
+    if not f.is_file():
+        return [{"text": f"[anexo {f.name}: nao achei o arquivo]"}]
+    ext = f.suffix.lower()
+    tam = f.stat().st_size
+    if ext in MIME:
+        if tam > MAX_INLINE:
+            return [{"text": f"[anexo {f.name}: {tam // 1048576} MB, grande demais pra mandar]"}]
+        return [{"text": f"[anexo: {f.name}]"},
+                {"inlineData": {"mimeType": MIME[ext],
+                                "data": base64.b64encode(f.read_bytes()).decode()}}]
+    bruto = f.read_bytes()[:200_000]
+    if ext in TEXTO or b"\x00" not in bruto[:4096]:
+        t = bruto.decode("utf-8", "replace")[:30_000]
+        return [{"text": f"[anexo: {f.name}]\n{t}"}]
+    return [{"text": f"[anexo {f.name}: formato {ext or '?'} que eu ainda nao leio]"}]
+
+
+def pensar(entrada, tools_desc, anexos=None):
     """Manda o turno pro Gemini e devolve {'fala':..., 'acoes':[...]}."""
     global _ultima_chamada
 
@@ -173,7 +207,8 @@ def pensar(entrada, tools_desc):
         "systemInstruction": {"parts": [{"text": sistema}]},
         "contents": [{
             "role": "user",
-            "parts": [{"text": f"MEMORIA:\n{resumo}\n\nCONVERSA:\n{contexto}\n\nAGORA:\n{entrada}"}],
+            "parts": [{"text": f"MEMORIA:\n{resumo}\n\nCONVERSA:\n{contexto}\n\nAGORA:\n{entrada}"}]
+                     + [x for a in (anexos or []) for x in partes_anexo(a)],
         }],
         "generationConfig": {
             "temperature": 0.8,

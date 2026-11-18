@@ -153,7 +153,10 @@ def ler_arquivo(caminho, limite=4000):
     p = Path(os.path.expandvars(caminho)).expanduser()
     if not p.is_file():
         return f"nao achei {p}"
-    return p.read_text(encoding="utf-8", errors="replace")[:limite]
+    bruto = p.read_bytes()[:200_000]
+    if b"\x00" in bruto[:4096]:
+        return f"{p.name} e binario ({p.stat().st_size // 1024} KB); so leio texto aqui"
+    return bruto.decode("utf-8", "replace")[:limite]
 
 
 # ---------- desinstalacao ----------
