@@ -8,6 +8,7 @@ mod config;
 mod guard;
 mod memoria;
 mod tools;
+mod voz;
 
 use agente::Saida;
 use cerebro::{Cerebro, Rede};
@@ -20,6 +21,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tools::Ctx;
+use voz::Voz;
 
 const BG: Color32 = Color32::from_rgb(0x0d, 0x11, 0x17);
 const PAINEL: Color32 = Color32::from_rgb(0x16, 0x1b, 0x22);
@@ -63,6 +65,7 @@ struct Pedido {
 struct App {
     ctx: Arc<Ctx>,
     cerebro: Arc<Cerebro>,
+    voz: Arc<Voz>,
     tx: Sender<Evento>,
     rx: Receiver<Evento>,
     linhas: Vec<(Tipo, String)>,
@@ -101,14 +104,17 @@ fn orbita(c: Pos2, raio: f32, inclinacao: f32, giro: f32, ang: f32) -> (Pos2, f3
 const ORBITAS: [(f32, f32, f32, f32); 3] =
     [(60.0, 1.18, 0.35, 0.9), (70.0, 1.28, -0.65, -0.7), (52.0, 1.05, 1.6, 1.25)];
 
-fn montar(cfg: Config) -> (Arc<Ctx>, Arc<Cerebro>) {
+fn montar(cfg: Config) -> (Arc<Ctx>, Arc<Cerebro>, Arc<Voz>) {
     let memoria = Arc::new(Mutex::new(Memoria::new(&cfg)));
-    let ctx = Arc::new(Ctx { cfg: cfg.clone(), memoria, http: Arc::new(Rede::new()) });
+    let http: Arc<dyn cerebro::Http> = Arc::new(Rede::new());
+    let ctx = Arc::new(Ctx { cfg: cfg.clone(), memoria, http: http.clone() });
+    let voz = Voz::new(cfg.clone(), http);
+    voz::preparar_sapi(&voz);
     #[cfg(debug_assertions)] // so em build de teste; o .exe de verdade nunca tem isso
     if std::env::var("ORION_FALSO").is_ok() {
-        return (ctx, Arc::new(Cerebro::new(cfg, Box::new(teste::Falsa))));
+        return (ctx, Arc::new(Cerebro::new(cfg, Box::new(teste::Falsa))), voz);
     }
-    (ctx, Arc::new(Cerebro::new(cfg, Box::new(Rede::new()))))
+    (ctx, Arc::new(Cerebro::new(cfg, Box::new(Rede::new()))), voz)
 }
 
 #[cfg(debug_assertions)]
@@ -143,12 +149,13 @@ impl App {
         v.panel_fill = BG;
         v.extreme_bg_color = PAINEL;
         cc.egui_ctx.set_visuals(v);
-        let (ctx, cerebro) = montar(Config::carregar());
+        let (ctx, cerebro, voz) = montar(Config::carregar());
         ctx.memoria.lock().unwrap().marcar_inicio();
         let (tx, rx) = channel();
         let mut app = App {
-            linhas: vec![(Tipo::Info, format!("online · {} chamadas hoje · pasta {}", cerebro.restante(), ctx.cfg.root.display()))],
-            ctx, cerebro, tx, rx,
+            linhas: vec![(Tipo::Info, format!("online · voz: {} · {} chamadas hoje · 'calado' silencia",
+                                              voz.motor(), cerebro.restante()))],
+            ctx, cerebro, voz, tx, rx,
             entrada: String::new(),
             ocupado: false,
             pedido: None,
@@ -175,6 +182,20 @@ impl App {
             return;
         }
         self.entrada.clear();
+        self.voz.parar(); // mandou algo novo: corta a fala
+        match t.to_lowercase().as_str() {
+            "calado" | "cala a boca" | "silencio" | "silêncio" | "voz off" | "/calado" => {
+                self.voz.ligada.store(false, std::sync::atomic::Ordering::Relaxed);
+                self.linhas.push((Tipo::Info, "voz desligada ('voz on' religa)".into()));
+                return;
+            }
+            "voz on" | "pode falar" | "volta a falar" | "/voz" => {
+                self.voz.ligada.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.linhas.push((Tipo::Info, format!("voz ligada: {}", self.voz.motor())));
+                return;
+            }
+            _ => {}
+        }
         if t == "/sair" {
             ui_ctx.send_viewport_cmd(egui::ViewportCommand::Close); // on_exit salva a memoria
             return;
@@ -205,10 +226,10 @@ impl App {
             self.linhas.push((Tipo::Erro, format!("nao salvei a chave: {e}")));
             return;
         }
-        let (ctx, cerebro) = montar(Config::carregar());
+        let (ctx, cerebro, voz) = montar(Config::carregar());
         let ok = cerebro.listar_modelos();
         ctx.memoria.lock().unwrap().marcar_inicio();
-        (self.ctx, self.cerebro) = (ctx, cerebro);
+        (self.ctx, self.cerebro, self.voz) = (ctx, cerebro, voz);
         self.linhas.push(match ok {
             Ok(l) => (Tipo::Info, format!("chave salva e valida ({} modelos liberados)", l.len())),
             Err(e) => (Tipo::Erro, format!("chave salva, mas o Gemini recusou: {e}")),
@@ -219,6 +240,7 @@ impl App {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
                 Evento::Saida(Saida::Orion(t)) => {
+                    self.voz.falar(&t);
                     self.linhas.push((Tipo::Orion, t));
                     self.estado = Estado::Falando;
                     self.desde = Instant::now();
@@ -238,6 +260,10 @@ impl App {
     }
 
     fn tick(&mut self, dt: f32) {
+        if self.voz.falando() { // orb verde enquanto o audio toca de verdade
+            self.estado = Estado::Falando;
+            self.desde = Instant::now();
+        }
         // falando dura um pouco depois da fala chegar; depois volta a pensar (se ainda ocupado) ou parar
         if self.estado == Estado::Falando && self.desde.elapsed() > Duration::from_millis(2500) {
             self.estado = if self.ocupado { Estado::Pensando } else { Estado::Parado };
@@ -443,6 +469,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.voz.parar();
         // resume a sessao na memoria de longo prazo (max 25 s, pra nao travar o fechamento)
         let (ctx, cerebro) = (self.ctx.clone(), self.cerebro.clone());
         let t = std::thread::spawn(move || {

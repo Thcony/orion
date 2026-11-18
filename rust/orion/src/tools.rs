@@ -31,7 +31,7 @@ pub const DESCRICAO: &str = "- rodar_cmd(comando, shell=\"cmd\"|\"powershell\") 
 - anotar(titulo, texto) no Obsidian | lembrar_isso(chave, valor)";
 
 // ---------------- processos ----------------
-fn comando(programa: &str) -> Command {
+pub(crate) fn comando(programa: &str) -> Command {
     #[allow(unused_mut)]
     let mut c = Command::new(programa);
     #[cfg(windows)]
@@ -90,12 +90,16 @@ fn cmd(linha: &str, limite: u64) -> (Option<i32>, String, String) {
 }
 
 /// PowerShell via -EncodedCommand: zero problema com aspas.
-fn powershell(script: &str, limite: u64) -> (Option<i32>, String, String) {
+pub(crate) fn powershell_cmd(script: &str) -> Command {
     let s = format!("[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ProgressPreference='SilentlyContinue'; {script}");
     let utf16: Vec<u8> = s.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let mut c = comando("powershell");
     c.args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &base64::engine::general_purpose::STANDARD.encode(utf16)]);
-    rodar(c, Duration::from_secs(limite))
+    c
+}
+
+fn powershell(script: &str, limite: u64) -> (Option<i32>, String, String) {
+    rodar(powershell_cmd(script), Duration::from_secs(limite))
 }
 
 fn juntar((codigo, out, err): (Option<i32>, String, String)) -> String {

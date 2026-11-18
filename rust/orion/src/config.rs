@@ -9,6 +9,7 @@ const PLACEHOLDER: [&str; 2] = ["SEU_USUARIO", "cole_sua_chave"];
 
 #[derive(Clone)]
 pub struct Config {
+    #[allow(dead_code)] // usado no auto-update proprio (fase 4)
     pub root: PathBuf,
     pub data: PathBuf,
     pub env_path: PathBuf,
@@ -21,6 +22,12 @@ pub struct Config {
     pub intervalo_min: f32,
     pub turnos_contexto: usize,
     pub sem_freio: bool,
+    pub voz: bool,
+    pub voz_motor: String,
+    pub voz_gemini: String,
+    pub voz_modelo: String,
+    pub voz_nome: String,
+    pub voz_velocidade: i32,
 }
 
 /// Pasta do Orion: ORION_DIR, ou a do exe, ou a de cima (exe em dist/).
@@ -88,6 +95,12 @@ impl Config {
             intervalo_min: get("ORION_INTERVALO_MIN", "1.5").parse().unwrap_or(1.5),
             turnos_contexto: get("ORION_TURNOS_CONTEXTO", "8").parse().unwrap_or(8),
             sem_freio: get("ORION_SEM_FREIO", "0") == "1",
+            voz: get("ORION_VOZ", "1") == "1",
+            voz_motor: get("ORION_VOZ_MOTOR", "gemini"),
+            voz_gemini: get("ORION_VOZ_GEMINI", "Charon"),
+            voz_modelo: get("ORION_VOZ_MODELO", "gemini-2.5-flash-preview-tts"),
+            voz_nome: get("ORION_VOZ_NOME", ""),
+            voz_velocidade: get("ORION_VOZ_VELOCIDADE", "0").parse().unwrap_or(0),
             root,
             data,
             env_path,
