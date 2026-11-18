@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core import brain, config, guard, memory, scheduler, tools, updater
-from senses import watcher
+from senses import watcher, voz
 
 if os.name == "nt":
     os.system("")  # liga as cores ANSI no console do Windows
@@ -23,6 +23,7 @@ VERDE, AMARELO, VERMELHO, CINZA, RESET = (
 
 def fala(texto):
     print(f"{VERDE}Orion:{RESET} {texto}")
+    voz.falar(texto)
 
 
 def confirmar(pergunta):
@@ -110,6 +111,13 @@ def main():
             print(f"falhou: {e}")
         return
 
+    if len(sys.argv) > 1 and sys.argv[1] == "vozes":
+        vs = voz.listar_vozes()
+        print("\n".join(vs) if vs else "nenhuma voz achada (ou nao e Windows)")
+        if vs:
+            print("\n-> escolhe uma com: ORION_VOZ_NOME=<parte do nome> no .env")
+        return
+
     if len(sys.argv) > 1 and sys.argv[1] == "chave":
         if len(sys.argv) < 3:
             print("uso: orion chave SUA_CHAVE   (gratis em https://aistudio.google.com/apikey)")
@@ -134,8 +142,10 @@ def main():
     scheduler.vigiar(lambda t: fala(f"Lembrete: {t}"))
     watcher.vigiar(fala)
 
+    estado_voz = "voz on" if (config.VOZ and voz.disponivel()) else "mudo"
     print(f"{VERDE}Orion online.{RESET} vault: {config.VAULT}")
-    print(f"{CINZA}modelo {config.MODELO} | {brain.orcamento.restante()} chamadas hoje | 'sair' encerra{RESET}\n")
+    print(f"{CINZA}{brain.orcamento.restante()} chamadas hoje | {estado_voz} | "
+          f"'calado' silencia | 'sair' encerra{RESET}\n")
 
     while True:
         try:
@@ -147,6 +157,15 @@ def main():
             continue
         if e.lower() in ("sair", "exit", "quit"):
             break
+        voz.parar()  # cortou a fala ao mandar algo novo
+        if e.lower() in ("calado", "cala a boca", "silencio", "voz off"):
+            config.VOZ = False
+            fala("Ok, modo texto.") if False else print(f"{CINZA}voz desligada{RESET}")
+            continue
+        if e.lower() in ("voz on", "pode falar", "volta a falar"):
+            config.VOZ = True
+            print(f"{CINZA}voz ligada{RESET}")
+            continue
         turno(e)
 
     fala("Fechando. Ta tudo no vault.")
